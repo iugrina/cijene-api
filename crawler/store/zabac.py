@@ -1,8 +1,6 @@
 import datetime
 import logging
-import os
-import re
-from urllib.parse import unquote
+from collections import defaultdict
 
 from bs4 import BeautifulSoup
 from crawler.store.models import Product, Store
@@ -18,15 +16,6 @@ class ZabacCrawler(BaseCrawler):
     CHAIN = "zabac"
     BASE_URL = "https://zabacfoodoutlet.hr/cjenik/"
 
-    # Regex to parse store information from the filename
-    # Format: <type><address>-<city>-<zipcode>-<date>-<time>-<something>.csv
-    # Example: SupermarketDubrava-256L-Zagreb-10000-9.7.2025-7.00h-C8.csv
-    # Since there's no divider between type and address, we'll need to hardcode
-    # types that are used, currently only "Supermarket"
-    STORE_FILENAME_PATTERN = re.compile(
-        r"^(?P<type>Supermarket)(?P<address>.+)-(?P<city>[^-]+)-(?P<zipcode>\d+)-[^-]+-[^-]+-[^-]+\.csv$"
-    )
-
     # Mapping for price fields from CSV columns
     PRICE_MAP = {
         # field: (column_name, is_required)
@@ -38,7 +27,7 @@ class ZabacCrawler(BaseCrawler):
 
     # Mapping for other product fields from CSV columns
     FIELD_MAP = {
-        "product_id": ("Šifra", True),
+        "product_id": ("Šifra artikla", True),
         "barcode": ("Barcode", False),
         "product": ("Naziv artikla", True),
         "brand": ("Marka", False),
@@ -46,18 +35,25 @@ class ZabacCrawler(BaseCrawler):
         "category": ("Naziv grupe artikala", False),
     }
 
-    # Store IDs are no longer included in the CSV filename, so use this lookup
-    # table to determine the store ID and keep backward compatibility with
-    # previously loaded data.
-    STORE_IDS = {
-        "tratinska 80a": "PJ-2",
-        "nemciceva 1": "PJ-4",
-        "bozidara magovca": "PJ-5",
-        "dolac 2": "PJ-6",
-        "dubrava 256l": "PJ-7",
-        "ilica 231": "PJ-9",
-        "zagrebacka cesta 205": "PJ-10",
-        "savska cesta 206": "PJ-11",
+    # Location pages on the Žabac website, mapped to store metadata.
+    # The website uses a ?lokacija= query parameter to switch between stores.
+    LOCATIONS = {
+        "dubrava-256l": {
+            "store_id": "PJ-7",
+            "name": "Žabac PJ-7",
+            "store_type": "Supermarket",
+            "street_address": "Dubrava 256L",
+            "city": "Zagreb",
+            "zipcode": "10000",
+        },
+        "velika-gorica": {
+            "store_id": "PJ-VG",
+            "name": "Žabac PJ-VG",
+            "store_type": "Supermarket",
+            "street_address": "Trg Grada Vukovara 8",
+            "city": "Velika Gorica",
+            "zipcode": "10410",
+        },
     }
 
     def parse_index(self, content: str) -> list[str]:
@@ -79,55 +75,6 @@ class ZabacCrawler(BaseCrawler):
 
         return list(set(urls))  # Return unique URLs
 
-    def parse_store_info(self, url: str) -> Store:
-        """
-        Extracts store information from a CSV download URL.
-
-        Example URL:
-        https://zabacfoodoutlet.hr/wp-content/uploads/2025/05/Cjenik-Zabac-Food-Outlet-PJ-11-Savska-Cesta-206.csv
-
-        Args:
-            url: CSV download URL with store information in the filename
-
-        Returns:
-            Store object with parsed store information
-        """
-        logger.debug(f"Parsing store information from Zabac URL: {url}")
-
-        filename = unquote(os.path.basename(url))
-
-        match = self.STORE_FILENAME_PATTERN.match(filename)
-        if not match:
-            raise ValueError(f"Invalid CSV filename format for Zabac: {filename}")
-
-        data = match.groupdict()
-
-        # Address: "Savska-Cesta-206" -> "Savska Cesta 206"
-        address_raw = data["address"]
-        street_address = address_raw.replace("-", " ")
-
-        store_id = self.STORE_IDS.get(street_address.lower())
-        if not store_id:
-            raise ValueError(
-                f"Unable to determine store ID for address: {street_address}"
-            )
-
-        store = Store(
-            chain=self.CHAIN,
-            store_type=data["type"],
-            store_id=store_id,
-            name=f"Žabac {store_id}",
-            street_address=street_address,
-            zipcode=data["zipcode"],
-            city=data["city"],
-            items=[],
-        )
-
-        logger.info(
-            f"Parsed Žabac store: {store.name}, Address: {store.street_address}"
-        )
-        return store
-
     def get_store_prices(self, csv_url: str) -> list[Product]:
         """
         Fetch and parse store prices from a Žabac CSV URL.
@@ -148,38 +95,38 @@ class ZabacCrawler(BaseCrawler):
             )
             return []
 
-    def get_index(self, date: datetime.date) -> list[str]:
+    def get_index(self, date: datetime.date) -> list[tuple[str, str]]:
         """
-        Fetch and parse the Žabac index page to get CSV URLs for given date.
+        Fetch and parse all Žabac location pages to get CSV URLs for given date.
 
         Args:
             date: The date parameter
 
         Returns:
-            List of CSV URLs available on the index page for the given date.
+            List of (csv_url, location_key) tuples for the given date.
         """
-        content = self.fetch_text(self.BASE_URL)
-
-        if not content:
-            logger.warning(f"No content found at Žabac index URL: {self.BASE_URL}")
-            return []
-
+        results = []
         url_date = f"{date.day}.{date.month}.{date.year}"
         url_date_padded = f"{date.day:02d}.{date.month:02d}.{date.year}"
-        return [
-            url
-            for url in self.parse_index(content)
-            if url_date in url or url_date_padded in url
-        ]
+
+        for location_key in self.LOCATIONS:
+            page_url = f"{self.BASE_URL}?lokacija={location_key}"
+            content = self.fetch_text(page_url)
+            if not content:
+                logger.warning(f"No content at {page_url}")
+                continue
+            for url in self.parse_index(content):
+                if url_date in url or url_date_padded in url:
+                    results.append((url, location_key))
+
+        return results
 
     def get_all_products(self, date: datetime.date) -> list[Store]:
         """
         Main method to fetch and parse all Žabac store, product, and price info.
 
-        Note: Date parameter is ignored as Žabac only provides current prices.
-
         Args:
-            date: The date parameter (ignored for Žabac)
+            date: The date parameter
 
         Returns:
             List of Store objects with their products.
@@ -190,28 +137,33 @@ class ZabacCrawler(BaseCrawler):
             logger.warning("No Žabac CSV links found")
             return []
 
+        # Group URLs by location to create one Store per location
+        location_urls: dict[str, list[str]] = defaultdict(list)
+        for url, location_key in csv_links:
+            location_urls[location_key].append(url)
+
         stores = []
-        for url in csv_links:
-            try:
-                store = self.parse_store_info(url)
+        for location_key, urls in location_urls.items():
+            loc = self.LOCATIONS[location_key]
+            store = Store(
+                chain=self.CHAIN,
+                store_type=loc["store_type"],
+                store_id=loc["store_id"],
+                name=loc["name"],
+                street_address=loc["street_address"],
+                zipcode=loc["zipcode"],
+                city=loc["city"],
+                items=[],
+            )
+
+            for url in urls:
                 products = self.get_store_prices(url)
-            except ValueError as ve:
-                logger.error(
-                    f"Skipping store due to parsing error from URL {url}: {ve}",
-                    exc_info=False,
-                )
-                continue
-            except Exception as e:
-                logger.error(
-                    f"Error processing Žabac store from {url}: {e}", exc_info=True
-                )
+                store.items.extend(products)
+
+            if not store.items:
+                logger.warning(f"No products for {store.name}, skipping")
                 continue
 
-            if not products:
-                logger.warning(f"No products found for Žabac store at {url}, skipping.")
-                continue
-
-            store.items = products
             stores.append(store)
 
         return stores
@@ -239,5 +191,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.DEBUG)
     crawler = ZabacCrawler()
     stores = crawler.crawl(datetime.date.today())
-    print(stores[0])
-    print(stores[0].items[0])
+    for store in stores:
+        print(store)
+        print(store.items[0])
