@@ -1,16 +1,12 @@
-import csv
 import datetime
-import io
 from json import loads
 import logging
 import re
-from decimal import Decimal
-from typing import List, Optional, Tuple
-
+from typing import Any, Optional, Tuple
 
 from crawler.store.base import BaseCrawler
-from crawler.store.models import Product, Store
-from crawler.store.utils import parse_price, to_camel_case
+from crawler.store.models import Store
+from crawler.store.utils import to_camel_case
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +22,26 @@ class TommyCrawler(BaseCrawler):
 
     CHAIN = "tommy"
     BASE_URL = "https://spiza.tommy.hr/api/v2"
+
+    PRICE_MAP = {
+        "price": ("MPC", False),
+        "unit_price": ("CIJENA_PO_JM", False),
+        "special_price": ("MPC_POSEBNA_PRODAJA", False),
+        "best_price_30": ("MPC_NAJNIZA_30", False),
+        "anchor_price": ("MPC_020525", False),
+        "initial_price": ("PRVA_CIJENA_NOVOG_ARTIKLA", False),
+    }
+
+    FIELD_MAP = {
+        "product": ("NAZIV_ARTIKLA", True),
+        "product_id": ("SIFRA_ARTIKLA", True),
+        "barcode": ("BARKOD_ARTIKLA", False),
+        "brand": ("BRAND", False),
+        "category": ("ROBNA_STRUKTURA", False),
+        "unit": ("JEDINICA_MJERE", False),
+        "quantity": ("NETO_KOLICINA", False),
+        "date_added": ("DATUM_ULASKA_NOVOG_ARTIKLA", False),
+    }
 
     def fetch_stores_list(self, date: datetime.date) -> dict[str, str]:
         """
@@ -79,8 +95,6 @@ class TommyCrawler(BaseCrawler):
             return None
 
         try:
-            # Use regex to extract day, month, and year
-            # The pattern handles both single and double-digit day/month
             match = re.match(r"(\d{1,2})\.(\d{1,2})\.(\d{4})\.", date_str)
 
             if match:
@@ -94,171 +108,15 @@ class TommyCrawler(BaseCrawler):
             logger.warning(f"Failed to parse date string '{date_str}': {e}")
             return None
 
-    def parse_csv(self, csv_content: str) -> List[Product]:
-        """
-        Parse CSV content and extract product information.
+    def fix_product_data(self, data: dict[str, Any]) -> dict[str, Any]:
+        # Parse date_added from string to date before the base class processes it
+        date_str = data.get("date_added", "")
+        if date_str:
+            data["date_added"] = self.parse_date_string(date_str)
+        else:
+            data["date_added"] = None
 
-        Args:
-            csv_content: Content of the CSV file
-
-        Returns:
-            List of Product objects
-
-        CSV format:
-            BARKOD_ARTIKLA,SIFRA_ARTIKLA,NAZIV_ARTIKLA,BRAND,ROBNA_STRUKTURA,
-            JEDINICA_MJERE,NETO_KOLICINA,MPC,MPC_POSEBNA_PRODAJA,CIJENA_PO_JM,
-            MPC_NAJNIZA_30,MPC_020525,DATUM_ULASKA_NOVOG_ARTIKLA,PRVA_CIJENA_NOVOG_ARTIKLA
-        """
-        logger.debug("Parsing CSV content")
-
-        products = []
-        success_count = 0
-        error_count = 0
-
-        try:
-            # Read CSV content using StringIO and DictReader
-            csv_file = io.StringIO(csv_content)
-            reader = csv.DictReader(csv_file)  # type: ignore
-
-            if not reader.fieldnames:
-                logger.warning("CSV file has no header row")
-                return products
-
-            logger.debug(f"CSV header: {reader.fieldnames}")
-
-            # Define expected field names
-            field_map = {
-                "barcode": "BARKOD_ARTIKLA",
-                "product_id": "SIFRA_ARTIKLA",
-                "product_name": "NAZIV_ARTIKLA",
-                "brand": "BRAND",
-                "category": "ROBNA_STRUKTURA",
-                "unit": "JEDINICA_MJERE",
-                "quantity": "NETO_KOLICINA",
-                "price": "MPC",
-                "special_price": "MPC_POSEBNA_PRODAJA",
-                "unit_price": "CIJENA_PO_JM",
-                "lowest_price_30days": "MPC_NAJNIZA_30",
-                "anchor_price": "MPC_020525",
-                "date_added": "DATUM_ULASKA_NOVOG_ARTIKLA",
-                "initial_price": "PRVA_CIJENA_NOVOG_ARTIKLA",
-            }
-
-            row_count = 0
-            for row in reader:
-                row_count += 1
-
-                try:
-                    # Extract mandatory fields from the row
-                    barcode = row.get(field_map["barcode"], "").strip()
-                    product_id = row.get(field_map["product_id"], "").strip()
-                    product_name = row.get(field_map["product_name"], "").strip()
-                    brand = row.get(field_map["brand"], "").strip()
-                    category = row.get(field_map["category"], "").strip()
-                    unit = row.get(field_map["unit"], "").strip()
-                    quantity = row.get(field_map["quantity"], "").strip()
-
-                    # Parse price fields with proper error handling
-                    try:
-                        price = parse_price(row.get(field_map["price"], "0"))
-                    except Exception as e:
-                        logger.warning(f"Failed to parse price in row {row_count}: {e}")
-                        price = Decimal("0.00")
-
-                    try:
-                        unit_price = parse_price(row.get(field_map["unit_price"], "0"))
-                    except Exception as e:
-                        logger.warning(
-                            f"Failed to parse unit_price in row {row_count}: {e}"
-                        )
-                        unit_price = Decimal("0.00")
-
-                    # Parse optional price fields
-                    special_price = None
-                    lowest_price_30days = None
-                    anchor_price = None
-                    initial_price = None
-                    date_added = None
-
-                    special_price_str = row.get(field_map["special_price"], "")
-                    if special_price_str.strip():
-                        try:
-                            special_price = parse_price(special_price_str)
-                        except Exception:
-                            pass
-
-                    lowest_price_30days_str = row.get(
-                        field_map["lowest_price_30days"], ""
-                    )
-                    if lowest_price_30days_str.strip():
-                        try:
-                            lowest_price_30days = parse_price(lowest_price_30days_str)
-                        except Exception:
-                            pass
-
-                    anchor_price_str = row.get(field_map["anchor_price"], "")
-                    if anchor_price_str.strip():
-                        try:
-                            anchor_price = parse_price(anchor_price_str)
-                        except Exception:
-                            pass
-
-                    date_added_str = row.get(field_map["date_added"], "")
-                    if date_added_str.strip():
-                        date_added = self.parse_date_string(date_added_str)
-
-                    initial_price_str = row.get(field_map["initial_price"], "")
-                    if initial_price_str.strip():
-                        try:
-                            initial_price = parse_price(initial_price_str)
-                        except Exception:
-                            pass
-
-                    # Create product if we have the minimum required fields
-                    if product_name and (price or unit_price):
-                        # If one price is missing but the other exists, use the existing one for both
-                        if price and not unit_price:
-                            unit_price = price
-                        elif unit_price and not price:
-                            price = unit_price
-
-                        product = Product(
-                            product=product_name,
-                            product_id=product_id,
-                            barcode=barcode,
-                            brand=brand,
-                            category=category,
-                            unit=unit,
-                            quantity=quantity,
-                            price=price,
-                            special_price=special_price,
-                            unit_price=unit_price,
-                            best_price_30=lowest_price_30days,  # Map lowest_price_30days to best_price_30
-                            anchor_price=anchor_price,
-                            date_added=date_added,
-                            initial_price=initial_price,
-                        )
-                        products.append(product)
-                        success_count += 1
-                    else:
-                        logger.warning(
-                            f"Skipping product in row {row_count} with missing required fields: {row}"
-                        )
-                        error_count += 1
-
-                except Exception as e:
-                    logger.error(f"Error parsing product row {row_count}: {e}")
-                    logger.debug(f"Problematic row: {row}")
-                    error_count += 1
-
-            logger.info(
-                f"Parsed {len(products)} products from CSV (total rows: {row_count}, errors: {error_count})"
-            )
-            return products
-
-        except Exception as e:
-            logger.error(f"Error parsing CSV: {e}")
-            return []
+        return super().fix_product_data(data)
 
     def parse_store_from_filename(
         self, filename: str
@@ -270,7 +128,7 @@ class TommyCrawler(BaseCrawler):
             filename: The filename from the API
 
         Returns:
-            Tuple of (store_type, address, zipcode, city)
+            Tuple of (store_type, store_id, address, zipcode, city)
 
         Example:
             "SUPERMARKET, ANTE STARČEVIĆA 6, 20260 KORČULA, 10180, 2, 20250516 0530"
@@ -329,8 +187,7 @@ class TommyCrawler(BaseCrawler):
             date: The date for which to fetch the price list
 
         Returns:
-            Tuple with the date and the list of Store objects,
-            each containing its products.
+            List of Store objects, each containing its products.
 
         Raises:
             ValueError: If the price list cannot be fetched or parsed
