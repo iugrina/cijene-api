@@ -7,9 +7,12 @@ from time import time
 from typing import List
 
 from crawler.store.boso import BosoCrawler
+from crawler.store.branka import BrankaCrawler
 from crawler.store.brodokomerc import BrodokomercCrawler
+from crawler.store.djelo_vodice import DjeloVodiceCrawler
 from crawler.store.dm import DmCrawler
 from crawler.store.eurospin import EurospinCrawler
+from crawler.store.gavranovic import GavranovicCrawler
 from crawler.store.jadranka_trgovina import JadrankaTrgovinaCrawler
 from crawler.store.kaufland import KauflandCrawler
 from crawler.store.konzum import KonzumCrawler
@@ -55,6 +58,9 @@ CRAWLERS = {
     LorencoCrawler.CHAIN: LorencoCrawler,
     BosoCrawler.CHAIN: BosoCrawler,
     JadrankaTrgovinaCrawler.CHAIN: JadrankaTrgovinaCrawler,
+    GavranovicCrawler.CHAIN: GavranovicCrawler,
+    BrankaCrawler.CHAIN: BrankaCrawler,
+    DjeloVodiceCrawler.CHAIN: DjeloVodiceCrawler,
 }
 
 
