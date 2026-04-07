@@ -77,9 +77,11 @@ class MyCrawler(BaseCrawler):
 
 - `fetch_text(url, encodings=None, prefix=None)`: Download text content
 - `fetch_binary(url, file_pointer)`: Download binary content
+- `read_csv(text, delimiter=",")`: Parse CSV text into a `DictReader`
 - `parse_price(price_str, required=False)`: Parse price strings to Decimal
 - `parse_csv(content, delimiter=",")`: Parse CSV content to Product objects
 - `parse_xml_product(element)`: Parse XML element to Product object
+- `get_zip_contents(url, suffix)`: Download ZIP and yield `(filename, bytes)` for each matching file
 - `get_all_products(date)`: **Abstract method** - main entry point for crawling
 
 ## Data Models
@@ -154,7 +156,7 @@ def get_all_products(self, date: datetime.date) -> list[Store]:
     return stores
 ```
 
-**Examples**: Konzum, Eurospin, KTC, Metro, NTL, Žabac
+**Examples**: Konzum, KTC, Metro, NTL, Žabac, Brodokomerc, Trgovina Krk, Roto, Boso
 
 ### 2. ZIP Archive Crawlers
 
@@ -182,11 +184,11 @@ def get_all_products(self, date: datetime.date) -> list[Store]:
 
 The `get_zip_contents()` method handles downloading the ZIP to a temporary file and yielding the name and content of each matching file inside.
 
-**Note**: `StudenacCrawler` (`studenac.py`) overrides this method to use the `unzip` command-line tool, which can be more robust for certain archives.
+**Note**: `StudenacCrawler` (`studenac.py`) overrides this method to use the `unzip` command-line tool, which can be more robust for certain archives. Studenac's ZIP contains XML files rather than CSVs.
 
 See `LidlCrawler.get_all_products()` for typical usage.
 
-**Examples**: Lidl, Plodine
+**Examples**: Lidl, Plodine, Eurospin, Studenac
 
 ### 3. API-Based Crawlers
 
@@ -240,28 +242,41 @@ def get_all_products(self, date: datetime.date) -> list[Store]:
     return [store]
 ```
 
-**Examples**: DM
+**Examples**: DM, Lorenco, Jadranka Trgovina
 
-### 5. API-Based Crawlers
-
-Some stores provide JSON APIs that return CSV download URLs. This approach is used when a store doesn't offer direct file downloads from a static page.
-
-**Example**: `TommyCrawler` in `tommy.py` uses this pattern. See the `fetch_stores_list` method.
-
-### 6. Excel-Based Crawlers
+### 5. Excel-Based Crawlers
 
 A few stores provide data in Excel format (.xlsx) instead of CSV or XML. This requires a library like `openpyxl` to parse.
 
 **Example**: `DmCrawler` in `dm.py` implements the `parse_excel` method to handle this.
 
-### 7. Date-Agnostic Crawlers
+### 6. XML-Based Crawlers
 
-Some stores only publish the latest price list and do not provide historical data. Their crawlers typically ignore the `date` parameter,
-but should output a warning if the date is provided that's different from the current date.
+Some stores provide data as XML files (not inside ZIP archives). These crawlers fetch XML files directly and use XPath to extract product elements.
 
-**Examples**: `ZabacCrawler` (`zabac.py`).
+```python
+def get_all_products(self, date: datetime.date) -> list[Store]:
+    # 1. Get XML file URLs for the date
+    xml_urls = self.get_index(date)
 
-### 8. Additional considerations
+    stores = []
+    for url in xml_urls:
+        try:
+            store = self.parse_store_from_filename(url)
+            content = self.fetch_binary_content(url)
+            products = self.parse_xml(content)
+            store.items = products
+            stores.append(store)
+        except Exception as e:
+            logger.error(f"Error processing {url}: {e}")
+            continue
+
+    return stores
+```
+
+**Examples**: Trgocentar, Vrutak, Ribola
+
+### 7. Additional considerations
 
 If a crawler needs to issue specific HTTP requests that don't fit into the standard pattern of fetching a text or binary resource,
 it should use `self.client` (an initialized httpx instance) to make those requests. This allows for custom methods, headers, parameters,
@@ -348,6 +363,8 @@ For XML-based stores, use the `parse_xml_product` method from `BaseCrawler`.
 - The base method uses simple XPath expressions. For more complex XML structures, you may need to override it.
 - See `StudenacCrawler.parse_xml()` in `studenac.py` for store info parsing from XML.
 - See `RibolaCrawler.parse_xml()` in `ribola.py` for a complete store and product parsing example.
+- See `TrgocentarCrawler` in `trgocentar.py` for XML with filename-based store info and a known-cities list for address parsing.
+- See `VrutakCrawler` in `vrutak.py` for date-grouped XML URLs parsed from an HTML table.
 
 An XML field mapping would look like this, using tag names:
 ```python
@@ -598,7 +615,7 @@ def parse_address(self, address_str):
 
 ### Step-by-Step Guide
 
-1. **Create new file**: `backend/crawler/store/new_chain.py`
+1. **Create new file**: `crawler/store/new_chain.py`
 
 2. **Implement basic structure**:
 ```python
